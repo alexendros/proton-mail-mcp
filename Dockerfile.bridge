@@ -15,4 +15,19 @@ RUN apt-get update \
       libfido2-1 \
       dbus-x11 \
       gpg-agent \
+      golang-docker-credential-helpers \
  && rm -rf /var/lib/apt/lists/*
+
+# Los paquetes Debian instalan las utilidades sin el prefijo `docker-`.
+# Bridge busca `docker-credential-pass` en $PATH → creamos symlinks para
+# ambos backends soportados.
+RUN set -eux; \
+    for bin in pass secretservice; do \
+      src="/usr/bin/docker-credential-${bin}"; \
+      alt="/usr/bin/${bin}"; \
+      if [ -x "$src" ]; then :; \
+      elif [ -x "$alt" ]; then ln -sf "$alt" "$src"; \
+      else ln -sf "/usr/bin/golang-docker-credential-${bin}" "$src" 2>/dev/null || true; \
+      fi; \
+      ls -l "$src" 2>/dev/null || echo "WARN: $src not provisioned"; \
+    done
