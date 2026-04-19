@@ -152,20 +152,20 @@ export async function buildForwardOptions(
   };
 }
 
-function prefixSubject(subject: string | undefined, prefix: string): string {
+export function prefixSubject(subject: string | undefined, prefix: string): string {
   const s = (subject ?? "").trim();
   if (s.toLowerCase().startsWith(prefix.toLowerCase())) return s;
   return `${prefix}${s}`;
 }
 
-function collectReferences(original: EmailFull): string[] {
+export function collectReferences(original: EmailFull): string[] {
   const refsHeader = original.headers["references"] ?? "";
   const existing: string[] = refsHeader.match(/<[^>]+>/g) ?? [];
   if (original.messageId) existing.push(original.messageId);
   return existing;
 }
 
-function addrMatches(addr: string, target: string): boolean {
+export function addrMatches(addr: string, target: string): boolean {
   const m = addr.match(/<([^>]+)>/);
   const email = (m?.[1] ?? addr).toLowerCase().trim();
   return email === target.toLowerCase().trim();
@@ -175,7 +175,7 @@ function isInList(addr: string, list: string[]): boolean {
   return list.some((a) => addrMatches(a, extractEmail(addr)));
 }
 
-function extractEmail(s: string): string {
+export function extractEmail(s: string): string {
   const m = s.match(/<([^>]+)>/);
   return (m?.[1] ?? s).trim();
 }

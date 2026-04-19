@@ -15,11 +15,15 @@
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.19.0",
     "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
     "imapflow": "^1.0.189",
     "mailparser": "^3.7.2",
     "nodemailer": "^6.9.16",
@@ -30,7 +34,10 @@
     "@types/mailparser": "^3.4.5",
     "@types/node": "^22.10.5",
     "@types/nodemailer": "^6.4.17",
-    "typescript": "^5.7.3"
+    "@types/supertest": "^6.0.2",
+    "supertest": "^7.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
   },
   "engines": {
     "node": ">=20"
