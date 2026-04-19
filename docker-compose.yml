@@ -1,32 +1,35 @@
-# Dokploy docker-compose for proton-mail-mcp in HTTP mode.
+# Dokploy docker-compose para proton-mail-mcp en HTTP mode.
 #
-# This stack runs:
-#   - bridge: Proton Mail Bridge headless (bridge-cli) with `pass` keychain backend
-#   - mcp: the MCP server, talking to bridge over the internal Docker network
+# Este stack arranca:
+#   - bridge: Proton Mail Bridge headless (imagen community `shenxn/protonmail-bridge`)
+#             con vault persistido en volumen
+#   - mcp:    el MCP server en modo HTTP, hablando con bridge por red interna
 #
-# IMPORTANT: Initial login to bridge-cli must be done INTERACTIVELY once per deploy.
-# See README.md > "Modo B: VPS Dokploy" for the one-off setup commands.
+# IMPORTANTE: el primer arranque requiere login one-off interactivo en bridge-cli:
+#   ssh dokploy
+#   docker compose -f /etc/dokploy/compose/<app>/code/docker-compose.yml \
+#                  run --rm bridge /bin/bash -c "/app/Bridge --cli"
+#   Dentro: login → 2FA → info (copiar "bridge password") → exit
+#   Pegar el bridge password en PROTON_BRIDGE_PASS (env del compose en Dokploy)
 #
-# After that, Bridge's vault is persisted in the `bridge-data` volume and the
-# container restarts autonomously.
+# Tras el login inicial, el volumen `bridge-data` persiste el vault y los
+# siguientes arranques son automáticos.
+#
+# Traefik: el routing a `protonmail.alexendros.me` lo gestiona Dokploy creando
+# el dominio via API (compose.create + domain.create). Este compose NO declara
+# labels Traefik manualmente — Dokploy los inyecta durante el deploy.
 
 services:
   bridge:
-    # Use the community-maintained headless image; pin a specific tag in production.
-    # Build your own from https://github.com/ProtonMail/proton-bridge if you prefer.
     image: shenxn/protonmail-bridge:latest
     restart: unless-stopped
     volumes:
       - bridge-data:/root
-    # Expose IMAP/SMTP only on the internal network, not on the host.
     expose:
       - "1143"
       - "1025"
     networks:
       - proton-net
-    # Initial login requires TTY:
-    #   docker compose run --rm bridge /bin/bash -c "/app/Bridge --cli"
-    #   Then inside: login → complete 2FA → info (to see bridge password) → exit
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "1143"]
       interval: 30s
@@ -47,24 +50,18 @@ services:
       PROTON_BRIDGE_PASS: ${PROTON_BRIDGE_PASS}
       PROTON_MAIL_FROM: ${PROTON_MAIL_FROM}
       PROTON_BRIDGE_TLS_INSECURE: "true"
+      NODE_ENV: production
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
       MCP_HTTP_PORT: 8787
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
-      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-    # Dokploy handles TLS termination via Traefik. Expose only internally.
     expose:
       - "8787"
     networks:
       - proton-net
-    labels:
-      # Dokploy/Traefik labels — adjust domain to yours
-      - "traefik.enable=true"
-      - "traefik.http.routers.proton-mcp.rule=Host(`protonmail.alexendros.me`)"
-      - "traefik.http.routers.proton-mcp.entrypoints=websecure"
-      - "traefik.http.routers.proton-mcp.tls.certresolver=letsencrypt"
-      - "traefik.http.services.proton-mcp.loadbalancer.server.port=8787"
+      - dokploy-network
 
 volumes:
   bridge-data:
@@ -72,3 +69,5 @@ volumes:
 networks:
   proton-net:
     driver: bridge
+  dokploy-network:
+    external: true
