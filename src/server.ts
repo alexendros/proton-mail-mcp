@@ -217,24 +217,41 @@ export function buildServer(cfg: Config, log: Logger): { server: McpServer; imap
     "proton_get_attachment",
     {
       title: "Download an attachment",
-      description: "Returns the bytes of a specific attachment encoded as base64. Use the attachment index from proton_get_email.",
+      description: "Returns the bytes of a specific attachment encoded as base64. Use the attachment index from proton_get_email. Large attachments are truncated to max_bytes (default 10 MB) with a truncated=true flag in the response.",
       inputSchema: {
         mailbox: z.string().default("INBOX"),
         uid: z.number().int().positive(),
         index: z.number().int().min(0).describe("Zero-based index in the attachments array"),
+        max_bytes: z
+          .number()
+          .int()
+          .positive()
+          .max(50 * 1024 * 1024)
+          .default(10 * 1024 * 1024)
+          .describe("Maximum attachment size in bytes (default 10 MB, hard cap 50 MB)"),
       },
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     },
-    async ({ mailbox, uid, index }) => {
+    async ({ mailbox, uid, index, max_bytes }) => {
       const att = await imap.getAttachment(mailbox, uid, index);
       if (!att) {
         return { isError: true, content: [{ type: "text", text: `Attachment #${index} not found for UID ${uid}.` }] };
       }
+      const bytes = Buffer.from(att.base64, "base64");
+      const truncated = bytes.byteLength > max_bytes;
+      const payload = truncated ? bytes.subarray(0, max_bytes) : bytes;
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ filename: att.filename, contentType: att.contentType, base64: att.base64 }),
+            text: JSON.stringify({
+              filename: att.filename,
+              contentType: att.contentType,
+              size_bytes: bytes.byteLength,
+              returned_bytes: payload.byteLength,
+              truncated,
+              base64: payload.toString("base64"),
+            }),
           },
         ],
       };

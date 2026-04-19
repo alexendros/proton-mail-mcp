@@ -63,24 +63,43 @@ export class ImapClient {
   /** Returns a connected, authenticated client. Reuses existing connection when possible. */
   private async connect(): Promise<ImapFlow> {
     if (this.client && this.client.usable) return this.client;
+    if (this.client && !this.client.usable) {
+      this.log.debug("IMAP client no longer usable, discarding");
+      try { await this.client.logout(); } catch { /* noop */ }
+      this.client = null;
+    }
     if (this.connecting) return this.connecting;
 
-    this.connecting = (async () => {
-      const c = new ImapFlow(this.buildOpts());
-      c.on("error", (err) => this.log.error("IMAP error event", { message: err.message }));
-      c.on("close", () => this.log.debug("IMAP connection closed"));
-      this.log.debug("Connecting to Proton Bridge IMAP", { host: this.cfg.host, port: this.cfg.imapPort });
-      await c.connect();
-      this.log.info("IMAP connected");
-      this.client = c;
-      return c;
-    })();
-
+    this.connecting = this.connectWithRetry();
     try {
       return await this.connecting;
     } finally {
       this.connecting = null;
     }
+  }
+
+  private async connectWithRetry(): Promise<ImapFlow> {
+    const maxAttempts = 3;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const c = new ImapFlow(this.buildOpts());
+        c.on("error", (err) => this.log.error("IMAP error event", { message: err.message }));
+        c.on("close", () => this.log.debug("IMAP connection closed"));
+        this.log.debug("Connecting to Proton Bridge IMAP", { host: this.cfg.host, port: this.cfg.imapPort, attempt });
+        await c.connect();
+        this.log.info("IMAP connected", { attempt });
+        this.client = c;
+        return c;
+      } catch (err) {
+        lastErr = err;
+        this.log.error("IMAP connect failed", { attempt, message: (err as Error).message });
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1)));
+        }
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error("IMAP connect failed");
   }
 
   async close(): Promise<void> {

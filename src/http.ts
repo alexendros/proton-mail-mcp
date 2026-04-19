@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { randomUUID } from "node:crypto";
+import { rateLimit } from "express-rate-limit";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,7 +34,16 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
 
   const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer; lastUsed: number }>();
 
-  app.use("/mcp", authMiddleware);
+  const limiter = rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    keyGenerator: (req) => extractBearer(req.headers.authorization as string | undefined) || req.ip || "anon",
+    message: { error: "rate_limit_exceeded" },
+  });
+
+  app.use("/mcp", limiter, authMiddleware);
 
   app.all("/mcp", async (req: Request, res: Response) => {
     const sessionId = (req.headers["mcp-session-id"] as string | undefined) ?? undefined;
