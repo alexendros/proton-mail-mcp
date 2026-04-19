@@ -1,5 +1,8 @@
 # proton-mail-mcp
 
+[![CI](https://github.com/alexendros/proton-mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alexendros/proton-mail-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 MCP server para **Proton Mail** vía **Proton Mail Bridge** (IMAP + SMTP). TypeScript, 13 tools, doble transporte (`stdio` y `streamable HTTP`). Pensado para **Claude Code CLI en Linux**, **Claude Routines** y tu **Command Center**.
 
 > Mantiene la garantía E2E de Proton: el cifrado/descifrado ocurre en Bridge, en una máquina que controlas tú.
@@ -10,9 +13,13 @@ MCP server para **Proton Mail** vía **Proton Mail Bridge** (IMAP + SMTP). TypeS
 
 - ✅ Typecheck limpio contra `@modelcontextprotocol/sdk@^1.19`, `imapflow@^1.0.189`, `nodemailer@^6.9.16`
 - ✅ Build `tsc` sin errores
+- ✅ **39 tests verdes** (Vitest + supertest): `auth`, `config`, `smtp-helpers`, `http-transport`
 - ✅ Smoke test stdio end-to-end: `initialize` + `tools/list` responden con las **13 tools** y annotations (`readOnlyHint`, `idempotentHint`, `destructiveHint`, `openWorldHint`)
+- ✅ Modo HTTP con **per-session** `StreamableHTTPServerTransport` (SDK best practice)
+- ✅ **Hardening**: bearer timing-safe, origin allowlist, rate limit 120/min por token, attachment cap 10 MB default
+- ✅ Reconexión IMAP con retry + backoff exponencial (3 intentos: 500ms, 1s, 2s)
 - ✅ Validación Zod de config con mensaje de error claro cuando faltan env vars
-- ⚠ Modo HTTP **no probado end-to-end** en el entorno de build (sandbox sin stack de red). El SDK puro sí funciona en test aislado y `enableJsonResponse` (que rompía en v1.19) está eliminado. Primer despliegue en Dokploy: arranca con `LOG_LEVEL=debug` para ver trazas.
+- ✅ Production guardrail: `NODE_ENV=production` requiere `MCP_ALLOWED_ORIGINS` no vacío
 
 ---
 
@@ -209,10 +216,10 @@ Push al repo que Dokploy observa. Dokploy construye con el `Dockerfile` y levant
 
 ```bash
 # Healthcheck
-curl https://mcp-proton.tudominio.com/healthz
+curl https://protonmail.alexendros.me/healthz
 
 # initialize
-curl -X POST https://mcp-proton.tudominio.com/mcp \
+curl -X POST https://protonmail.alexendros.me/mcp \
   -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -226,7 +233,7 @@ Si falla: `docker compose logs mcp` con `LOG_LEVEL=debug` para ver trazas.
 ```bash
 claude mcp add --transport http proton-mail-remote \
   --scope user \
-  https://mcp-proton.tudominio.com/mcp \
+  https://protonmail.alexendros.me/mcp \
   -H "Authorization: Bearer <MCP_AUTH_TOKEN>"
 ```
 
@@ -234,7 +241,7 @@ claude mcp add --transport http proton-mail-remote \
 
 En la UI de Routines (claude.ai), añade **Remote MCP Server**:
 
-- URL: `https://mcp-proton.tudominio.com/mcp`
+- URL: `https://protonmail.alexendros.me/mcp`
 - Authorization header: `Bearer <MCP_AUTH_TOKEN>`
 
 Ahora puedes programar rutinas tipo:
@@ -309,6 +316,9 @@ Una vez desplegado, el coste marginal por caso de uso adicional es 0.
 npm install
 npm run dev         # tsc --watch
 npm run typecheck
+npm run test        # vitest run · 39 tests
+npm run test:watch  # vitest en modo watch
+npm run smoke       # smoke stdio (initialize + tools/list)
 npm run inspect     # abre el MCP Inspector
 ```
 
@@ -316,11 +326,19 @@ Estructura:
 
 ```
 src/
-├── index.ts    # Entry: elige transporte (stdio | http), auth, CORS
+├── index.ts    # Entry: elige transporte (stdio | http), arranque y signals
 ├── config.ts   # Validación Zod de env vars + logger stderr
-├── imap.ts     # Pool IMAP persistente (imapflow) + operaciones lectura/modif
+├── auth.ts     # Timing-safe compareTokens + extractBearer
+├── http.ts     # buildHttpApp: StreamableHTTP per-session + rate limit + origin allowlist
+├── imap.ts     # Pool IMAP persistente (imapflow) con retry + backoff
 ├── smtp.ts     # SMTP (nodemailer) + helpers reply/forward con threading
 └── server.ts   # McpServer + registro de las 13 tools
+
+tests/
+├── auth.test.ts          # compareTokens / extractBearer
+├── config.test.ts        # Zod validation + CSV parsing
+├── smtp-helpers.test.ts  # prefixSubject, addrMatches, collectReferences
+└── http-transport.test.ts # auth flow (401/403/400/200) + session id + rate limit
 ```
 
 ---

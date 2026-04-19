@@ -61,7 +61,7 @@ services:
     labels:
       # Dokploy/Traefik labels — adjust domain to yours
       - "traefik.enable=true"
-      - "traefik.http.routers.proton-mcp.rule=Host(`mcp-proton.example.com`)"
+      - "traefik.http.routers.proton-mcp.rule=Host(`protonmail.alexendros.me`)"
       - "traefik.http.routers.proton-mcp.entrypoints=websecure"
       - "traefik.http.routers.proton-mcp.tls.certresolver=letsencrypt"
       - "traefik.http.services.proton-mcp.loadbalancer.server.port=8787"
