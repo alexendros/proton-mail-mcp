@@ -18,6 +18,7 @@ RUN apt-get update \
       golang-docker-credential-helpers \
       libgl1 \
       libegl1 \
+      libopengl0 \
       libxcb-cursor0 \
       libxkbcommon-x11-0 \
       libxcb-keysyms1 \
