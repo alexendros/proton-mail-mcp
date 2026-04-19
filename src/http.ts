@@ -1,3 +1,21 @@
+/**
+ * Transporte HTTP del MCP con Express.
+ *
+ * Decisiones clave:
+ *  - **Per-session transport**: cada cliente recibe su propio
+ *    `StreamableHTTPServerTransport` + `McpServer`, indexados por el header
+ *    `Mcp-Session-Id` que genera el SDK en el `initialize`. Sin esto, una
+ *    rutina de Routines y una llamada manual del Command Center podrían
+ *    pisarse estado mutuamente (capabilities, listas de tools, suscripciones).
+ *  - **Auth en middleware** antes del dispatcher MCP: un 401/403 se resuelve
+ *    sin tocar el protocolo. Allowlist de Origin = mitigación de DNS
+ *    rebinding; bearer timing-safe = no revelar la longitud del secreto.
+ *  - **Rate limit por token** (no por IP): en producción detrás de un
+ *    reverse proxy, la IP sería la del balanceador. El bearer es el
+ *    identificador real del cliente.
+ *  - **Idle eviction**: sesiones inactivas 30 min se cierran. Evita fugas de
+ *    memoria si un cliente abandona la conexión sin limpiar.
+ */
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { randomUUID } from "node:crypto";
 import { rateLimit } from "express-rate-limit";
@@ -20,9 +38,13 @@ export interface HttpAppDeps {
 }
 
 /**
- * Per-session transport + server pattern (recommended by MCP SDK).
- * One session = one transport = one McpServer instance. Session id travels
- * via `mcp-session-id` header.
+ * Construye la app Express del MCP. Exportada (no inlined en `index.ts`) para
+ * poder montarla en tests con `supertest` sin abrir un puerto real, ver
+ * `tests/http-transport.test.ts`.
+ *
+ * Contrato: una sesión MCP = un transport = un McpServer propio. La session id
+ * la genera el SDK en el `initialize` y viaja en el header `Mcp-Session-Id` en
+ * cada request siguiente.
  */
 export function buildHttpApp(deps: HttpAppDeps): Express {
   const { buildServer, cfg, log } = deps;
@@ -32,8 +54,12 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
   const app = express();
   app.use(express.json({ limit: "25mb" }));
 
+  // Registro en memoria de sesiones activas. `lastUsed` alimenta la eviction.
   const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: McpServer; lastUsed: number }>();
 
+  // 120 req/min por bearer (no por IP: detrás de un proxy todas las IPs son
+  // la misma). draft-7 = headers estándar modernos `RateLimit` en vez de los
+  // legacy `X-RateLimit-*`.
   const limiter = rateLimit({
     windowMs: 60_000,
     limit: 120,
@@ -43,6 +69,8 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
     message: { error: "rate_limit_exceeded" },
   });
 
+  // Orden importa: rate-limit ANTES de auth. Así un atacante que bombardee
+  // con tokens inválidos también consume su cuota y deja de ser útil.
   app.use("/mcp", limiter, authMiddleware);
 
   app.all("/mcp", async (req: Request, res: Response) => {
@@ -50,6 +78,8 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
     try {
       let entry = sessionId ? sessions.get(sessionId) : undefined;
 
+      // Caso 1: request sin sesión válida pero con body `initialize` →
+      // creamos transport + server nuevos y los registramos al terminar.
       if (!entry && req.method === "POST" && isInitializeRequest(req.body)) {
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
@@ -72,11 +102,14 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
         return;
       }
 
+      // Caso 2: request con session id desconocida o body no-initialize →
+      // 400 con shape JSON-RPC para que el cliente sepa reinicializar.
       if (!entry) {
         res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "No valid session. Send an initialize request first." }, id: null });
         return;
       }
 
+      // Caso 3: sesión existente. Actualizamos lastUsed y delegamos al SDK.
       entry.lastUsed = Date.now();
       await entry.transport.handleRequest(req, res, req.body);
     } catch (err) {
@@ -87,10 +120,16 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
     }
   });
 
+  // `/healthz` no pasa por el middleware de auth — lo usan uptime monitors
+  // y el healthcheck de Docker. Expone el número de sesiones como métrica
+  // barata para detectar fugas o cargas anómalas.
   app.get("/healthz", (_req: Request, res: Response) => {
     res.json({ ok: true, version: "0.1.0", sessions: sessions.size });
   });
 
+  // Eviction de sesiones idle. `setInterval().unref()` permite al proceso
+  // salir limpiamente aunque el timer esté activo (no bloquea el event loop
+  // al cerrar).
   setInterval(() => {
     const now = Date.now();
     const idleTimeout = 30 * 60 * 1000;
@@ -105,6 +144,14 @@ export function buildHttpApp(deps: HttpAppDeps): Express {
 
   return app;
 
+  /**
+   * Auth middleware. Orden y efectos:
+   *  1. Si el cliente envía `Origin` y tenemos allowlist, validamos. Sin
+   *     `Origin` (caso típico de cliente CLI o backend) aceptamos: no todos
+   *     los clientes MCP envían el header, y el bearer ya es suficiente para
+   *     los no-navegadores.
+   *  2. Bearer comparado timing-safe (ver `auth.ts`). Fail-closed.
+   */
   function authMiddleware(req: Request, res: Response, next: NextFunction): void {
     const origin = req.headers.origin as string | undefined;
     if (origin && allowedOrigins.size > 0 && !allowedOrigins.has(origin)) {

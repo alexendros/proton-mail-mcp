@@ -1,3 +1,23 @@
+/**
+ * Cliente IMAP contra Proton Mail Bridge.
+ *
+ * Por qué `imapflow` en vez de `imap` / `node-imap`: soporte nativo async/await,
+ * locks granulares por mailbox, `STARTTLS` correcto y compatibilidad con el
+ * servidor IMAP personalizado de Bridge (gluon).
+ *
+ * Patrones usados:
+ *  - **Conexión reutilizable**: `this.client` vive entre llamadas. `connect()`
+ *    detecta si el cliente sigue `usable` y lo reutiliza; si cayó, lo tira y
+ *    abre uno nuevo con retry + backoff.
+ *  - **Mailbox locks**: `getMailboxLock()` garantiza que dos operaciones
+ *    simultáneas sobre la misma mailbox (p. ej. list + search) no se pisen.
+ *  - **UIDs siempre, seq nunca**: las tools de modificación (flags, move,
+ *    delete) reciben UIDs del cliente y los pasan a imapflow con
+ *    `{ uid: true }`. Seq numbers cambian entre sesiones; los UIDs no.
+ *  - **Body parsing**: fetch con `source: true` → Buffer crudo → `mailparser`
+ *    para extraer text/html/attachments. Más lento que fetch parcial, pero
+ *    evita decodificar MIME a mano.
+ */
 import { ImapFlow, type ImapFlowOptions, type ListResponse, type FetchQueryObject, type SearchObject } from "imapflow";
 import { simpleParser, type ParsedMail, type Attachment } from "mailparser";
 import type { Config } from "./config.js";
@@ -51,11 +71,18 @@ export class ImapClient {
     return {
       host: this.cfg.host,
       port: this.cfg.imapPort,
+      // Bridge presenta TLS directo (sin STARTTLS) en 1143.
       secure: true,
+      // `rejectUnauthorized: false` necesario cuando Bridge usa cert
+      // autofirmado en 127.0.0.1. En producción estricta se puede pinear
+      // la CA de Bridge vía `PROTON_BRIDGE_CA_PATH` (roadmap).
       tls: { rejectUnauthorized: !this.cfg.tlsInsecure },
       auth: { user: this.cfg.user, pass: this.cfg.pass },
+      // Silenciamos el logger de imapflow (pino) para que no compita con
+      // nuestro logger stderr. Si hace falta debug, se reactiva aquí.
       logger: false,
-      // Bridge supports IDLE; keepalive avoids idle-timeout disconnects
+      // Bridge soporta IDLE. 60s de keepalive = Bridge no nos tira por idle
+      // timeout y nosotros no pagamos el coste de reconectar.
       maxIdleTime: 60_000,
     };
   }
@@ -78,6 +105,14 @@ export class ImapClient {
     }
   }
 
+  /**
+   * Reintenta conectar hasta 3 veces con backoff exponencial (500 ms, 1 s, 2 s).
+   *
+   * Motivación: en despliegue con Docker Compose / Swarm, Bridge puede
+   * tardar unos segundos en estar listo tras un reinicio. Sin retry, la
+   * primera llamada después del reinicio falla con `ECONNREFUSED` y el MCP
+   * devuelve error al modelo, que lo interpreta como "tool no disponible".
+   */
   private async connectWithRetry(): Promise<ImapFlow> {
     const maxAttempts = 3;
     let lastErr: unknown;
@@ -153,7 +188,15 @@ export class ImapClient {
   // Listing and searching
   // ---------------------------------------------------------------------------
 
-  /** Lists recent emails in a mailbox (newest first). */
+  /**
+   * Lista mensajes recientes (primero los más nuevos) con paginación.
+   *
+   * Truco: IMAP no tiene un `ORDER BY date DESC LIMIT offset`. Para simular
+   * paginación "newest-first" calculamos un rango de seq numbers desde el
+   * final (`total - offset`) hacia atrás `limit` posiciones. Esto asume que
+   * el orden de seq se corresponde con el orden de llegada — válido en
+   * Bridge/Proton, pero si migramos a otro IMAP habría que usar SORT.
+   */
   async listEmails(mailbox: string, limit: number, offset: number): Promise<{ items: EmailSummary[]; total: number }> {
     const c = await this.connect();
     const lock = await c.getMailboxLock(mailbox);
@@ -162,7 +205,8 @@ export class ImapClient {
       const total = status.messages ?? 0;
       if (total === 0) return { items: [], total: 0 };
 
-      // Newest first: compute seq range from the tail
+      // Ventana desde el final: si total=1000 y offset=0, end=1000, start=976
+      // (25 últimos mensajes). offset=25 → end=975, start=951.
       const end = total - offset;
       const start = Math.max(1, end - limit + 1);
       if (end < 1) return { items: [], total };

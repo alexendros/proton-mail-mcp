@@ -1,3 +1,15 @@
+/**
+ * Cliente SMTP contra Proton Mail Bridge + helpers de threading.
+ *
+ * Dos piezas:
+ *  1. `SmtpClient`: wrapper fino sobre `nodemailer` con pool persistente
+ *     (maxConnections 2, maxMessages 50). Bridge habla SMTP con STARTTLS en
+ *     1025 contra `127.0.0.1`. Cert autofirmado igual que IMAP.
+ *  2. `buildReplyOptions` / `buildForwardOptions`: construyen un
+ *     `SendOptions` respetando el estándar RFC 5322 de threading
+ *     (`In-Reply-To` + `References`). Sin esto los clientes de correo
+ *     tratarían la respuesta como hilo nuevo y romperían la conversación.
+ */
 import nodemailer, { type Transporter } from "nodemailer";
 import type { Config } from "./config.js";
 import type { EmailFull, ImapClient } from "./imap.js";
@@ -33,11 +45,15 @@ export class SmtpClient {
     this.transporter = nodemailer.createTransport({
       host: cfg.host,
       port: cfg.smtpPort,
-      // Bridge uses STARTTLS on its SMTP submission port
+      // Bridge escucha SMTP submission con STARTTLS, no TLS directo.
+      // secure=false + requireTLS=true = "inicia plaintext y súbete a TLS con STARTTLS, obligatorio".
       secure: false,
       requireTLS: true,
       tls: { rejectUnauthorized: !cfg.tlsInsecure },
       auth: { user: cfg.user, pass: cfg.pass },
+      // Pool: 2 conexiones simultáneas es más que suficiente para un MCP —
+      // los clientes llaman secuencialmente. maxMessages=50 recicla la
+      // conexión cada 50 envíos para evitar leaks en Bridge.
       pool: true,
       maxConnections: 2,
       maxMessages: 50,
@@ -80,6 +96,14 @@ export class SmtpClient {
 // Reply / Forward helpers: fetch original and build proper threaded send opts
 // -----------------------------------------------------------------------------
 
+/**
+ * Construye un `SendOptions` para responder a un mensaje preservando hilo.
+ *
+ * Regla de `to`: usar `Reply-To` si existe (convención para listas/newsletters),
+ * de lo contrario el `From` original. Regla de `cc` (reply_all): todos los
+ * destinatarios originales menos nuestra propia dirección (evita loop) y los
+ * ya incluidos en `to` (evita duplicados en el mismo correo).
+ */
 export async function buildReplyOptions(
   imap: ImapClient,
   mailbox: string,
@@ -158,6 +182,13 @@ export function prefixSubject(subject: string | undefined, prefix: string): stri
   return `${prefix}${s}`;
 }
 
+/**
+ * Construye el valor del header `References` para mantener el hilo RFC 5322.
+ *
+ * La cadena acumulada es: todos los `References` previos + el `Message-ID`
+ * del mensaje al que respondemos. Parseamos los anteriores como `<id>`
+ * separados (pueden venir con saltos de línea y espacios variables).
+ */
 export function collectReferences(original: EmailFull): string[] {
   const refsHeader = original.headers["references"] ?? "";
   const existing: string[] = refsHeader.match(/<[^>]+>/g) ?? [];

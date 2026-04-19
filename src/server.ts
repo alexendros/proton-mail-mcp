@@ -1,3 +1,23 @@
+/**
+ * Registro de las 13 MCP tools sobre un `McpServer`.
+ *
+ * Convenciones aplicadas a TODAS las tools:
+ *  - **`inputSchema` con Zod**: el SDK convierte el schema Zod a JSON Schema
+ *    draft-07 y lo expone en `tools/list`. El modelo ve tipos, descripciones
+ *    y defaults — puede construir llamadas válidas sin adivinar.
+ *  - **`annotations`**: cada tool declara al menos `readOnlyHint` y
+ *    `openWorldHint`. Las mutativas añaden `destructiveHint` o
+ *    `idempotentHint`. Esto permite al cliente MCP (y al humano que lo audita)
+ *    razonar sobre efectos sin leer el handler.
+ *  - **`response_format: "markdown" | "json"`** en las tools de lectura. Por
+ *    defecto markdown — más natural para el modelo al resumir. JSON cuando
+ *    el consumidor es un backend (ver `fetchUnreadSummary` en el Command
+ *    Center).
+ *
+ * Instrucciones del servidor: el `instructions` que se pasa al constructor es
+ * contexto que el modelo VE al listar tools. Por eso recordamos la necesidad
+ * de llamar primero a `proton_list_folders` y de usar UIDs (no seq numbers).
+ */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ImapClient } from "./imap.js";
@@ -143,6 +163,10 @@ export function buildServer(cfg: Config, log: Logger): { server: McpServer; imap
       annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
     },
     async (args) => {
+      // IMAP SEARCH no soporta OR nativo entre campos de forma portable, por
+      // eso la UX acumula keywords en múltiples campos combinándolos con AND.
+      // Para búsquedas "anywhere" (fields:["text"]) colapsamos a `body:query`:
+      // es lo más cercano a "contiene la palabra en cualquier parte".
       const criteria: SearchObject = {};
       if (args.unseen_only) criteria.seen = false;
       if (args.since) criteria.since = new Date(args.since);
@@ -153,6 +177,8 @@ export function buildServer(cfg: Config, log: Logger): { server: McpServer; imap
         for (const f of args.fields) {
           if (f === "text") criteria.body = args.query;
           if (f === "subject") criteria.subject = args.query;
+          // Un `from_address` explícito gana sobre `fields:["from"]` para
+          // evitar sobreescribir un filtro más específico.
           if (f === "from" && !criteria.from) criteria.from = args.query;
           if (f === "to" && !criteria.to) criteria.to = args.query;
           if (f === "body") criteria.body = args.query;
@@ -237,6 +263,10 @@ export function buildServer(cfg: Config, log: Logger): { server: McpServer; imap
       if (!att) {
         return { isError: true, content: [{ type: "text", text: `Attachment #${index} not found for UID ${uid}.` }] };
       }
+      // Defensa contra "adjunto gigante satura el contexto del LLM".
+      // Devolvemos siempre `size_bytes` (original) y `returned_bytes` (real
+      // servido) para que el consumidor pueda decidir si reintentar con
+      // max_bytes más alto o solicitar por otra vía.
       const bytes = Buffer.from(att.base64, "base64");
       const truncated = bytes.byteLength > max_bytes;
       const payload = truncated ? bytes.subarray(0, max_bytes) : bytes;
