@@ -1,0 +1,12 @@
+# Extiende la imagen community shenxn/protonmail-bridge añadiendo libfido2.
+# Contexto: Proton Mail Bridge 3.23.x (descargado por el launcher en tiempo de
+# ejecución) requiere libfido2.so.1 para autenticación WebAuthn, pero la imagen
+# base (Ubuntu 20.04 con solo deps mínimas) no la trae.
+# Sin este paquete el launcher crashea con:
+#   "error while loading shared libraries: libfido2.so.1: cannot open shared object"
+FROM shenxn/protonmail-bridge:latest
+
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libfido2-1 \
+ && rm -rf /var/lib/apt/lists/*
